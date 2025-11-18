@@ -53,7 +53,7 @@ def build_figure(
         fig.update_layout(
             title_text="No data available for the selected filters",
             xaxis_title="Electricity from Coal (% of total)",
-            yaxis_title="Electricity consumption per capita",
+            yaxis_title="Electricity consumption per capita (kWh)",
         )
         return fig
 
