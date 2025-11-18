@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from io import BytesIO
+import importlib.util
+from itertools import cycle
 
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
+from plotly.express import colors as px_colors
 import streamlit as st
 from PIL import Image
 
@@ -31,14 +35,14 @@ def load_data(path: str) -> pd.DataFrame:
     return df.dropna(subset=["Electricity_Consumption_Value", "Coal_Percentage_Value"])
 
 
+COLOR_PALETTE = px_colors.qualitative.Safe
+
+
 def build_figure(
     df_plot: pd.DataFrame,
     selected_countries: list[str],
-    year_range: tuple[int, int],
 ) -> go.Figure:
-    df_filtered = df_plot[
-        (df_plot["Year"] >= year_range[0]) & (df_plot["Year"] <= year_range[1])
-    ]
+    df_filtered = df_plot.copy()
 
     if selected_countries:
         df_filtered = df_filtered[df_filtered["Country Name"].isin(selected_countries)]
@@ -53,55 +57,49 @@ def build_figure(
         )
         return fig
 
-    fig = go.Figure()
-
-    for country in unique_countries:
-        country_data = df_filtered[df_filtered["Country Name"] == country]
-        if country_data.empty:
-            continue
-
-        first_year_data = country_data.sort_values(by="Year").iloc[0]
-        last_year_data = country_data.sort_values(by="Year").iloc[-1]
-        fig.add_trace(
-            go.Scatter(
-                x=country_data["Coal_Percentage_Value"],
-                y=country_data["Electricity_Consumption_Value"],
-                mode="lines+markers",
-                name=country,
-                visible=True,
-                showlegend=True,
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=[first_year_data["Coal_Percentage_Value"]],
-                y=[first_year_data["Electricity_Consumption_Value"]],
-                mode="text",
-                text=[str(first_year_data["Year"])],
-                textposition="bottom right",
-                name=f"{country} Start Year",
-                visible=True,
-                showlegend=False,
-            )
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=[last_year_data["Coal_Percentage_Value"]],
-                y=[last_year_data["Electricity_Consumption_Value"]],
-                mode="text",
-                text=[str(last_year_data["Year"])],
-                textposition="top left",
-                name=f"{country} End Year",
-                visible=True,
-                showlegend=False,
-            )
-        )
-
     x_min = df_filtered["Coal_Percentage_Value"].min() * 0.95
     x_max = df_filtered["Coal_Percentage_Value"].max() * 1.05
     y_min = df_filtered["Electricity_Consumption_Value"].min() * 0.95
     y_max = df_filtered["Electricity_Consumption_Value"].max() * 1.05
+
+    palette_cycle = cycle(COLOR_PALETTE)
+    color_map: dict[str, str] = {}
+    for country in unique_countries:
+        color_map[country] = next(palette_cycle)
+
+    fig = px.scatter(
+        df_filtered,
+        x="Coal_Percentage_Value",
+        y="Electricity_Consumption_Value",
+        animation_frame="Year",
+        animation_group="Country Name",
+        color="Country Name",
+        hover_name="Country Name",
+        category_orders={"Country Name": unique_countries},
+        color_discrete_map=color_map,
+        labels={
+            "Coal_Percentage_Value": "Electricity from Coal (% of total)",
+            "Electricity_Consumption_Value": "Electric power consumption (kWh per capita)",
+        },
+    )
+
+    for country in unique_countries:
+        country_data = (
+            df_filtered[df_filtered["Country Name"] == country]
+            .sort_values(by="Year")
+            .drop_duplicates(subset="Year")
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=country_data["Coal_Percentage_Value"],
+                y=country_data["Electricity_Consumption_Value"],
+                mode="lines",
+                line=dict(color=color_map[country], width=1.5),
+                name=f"{country} trend",
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
 
     fig.update_layout(
         title_text=(
@@ -115,6 +113,10 @@ def build_figure(
         hovermode="closest",
         height=700,
     )
+
+    if fig.layout.updatemenus:
+        fig.layout.updatemenus[0].buttons[0].args[1]["frame"]["duration"] = 800
+        fig.layout.updatemenus[0].buttons[0].args[1]["transition"]["duration"] = 200
 
     return fig
 
@@ -134,31 +136,27 @@ def figure_to_gif(fig: go.Figure) -> bytes:
     return output.read()
 
 
+def kaleido_available() -> bool:
+    """Check whether Kaleido is importable in the current environment."""
+
+    return importlib.util.find_spec("kaleido") is not None
+
+
 def main() -> None:
     st.title("Electricity Consumption vs. Coal Reliance")
     st.markdown(
         """
         Explore how the share of electricity generated from coal correlates with
         per-capita electricity consumption across countries. Use the controls
-        below to scroll through the historical timeline and compare multiple
-        countries side by side.
+        below to compare multiple countries and then press play on the chart to
+        watch the full historical timeline animate.
         """
     )
 
     with st.spinner("Loading data and preparing the visualization..."):
         df_plot = load_data(DATA_PATH)
 
-    min_year = int(df_plot["Year"].min())
-    max_year = int(df_plot["Year"].max())
-
     st.subheader("Customize the view")
-    selected_years = st.slider(
-        "Timeline (year range)",
-        min_value=min_year,
-        max_value=max_year,
-        value=(min_year, max_year),
-        step=1,
-    )
 
     all_countries = sorted(df_plot["Country Name"].unique())
     country_selection = st.multiselect(
@@ -168,24 +166,33 @@ def main() -> None:
         help="Choose any number of countries to display at once.",
     )
 
-    fig = build_figure(df_plot, country_selection, selected_years)
+    fig = build_figure(df_plot, country_selection)
 
     st.plotly_chart(fig, width="stretch")
+    st.caption("Press the ▶️ button below the chart to watch the timeline animate.")
 
-    try:
-        gif_bytes = figure_to_gif(fig)
-    except RuntimeError:
-        st.info(
-            "Install the optional `kaleido` dependency to enable GIF downloads.",
-            icon="ℹ️",
-        )
+    if kaleido_available():
+        try:
+            gif_bytes = figure_to_gif(fig)
+        except RuntimeError:
+            st.warning(
+                "Kaleido is installed but failed to initialize. Please restart the app.",
+                icon="⚠️",
+            )
+        else:
+            st.download_button(
+                label="Download current chart as GIF",
+                data=gif_bytes,
+                file_name="electricity_vs_coal.gif",
+                mime="image/gif",
+                use_container_width=True,
+            )
     else:
         st.download_button(
-            label="Download current chart as GIF",
-            data=gif_bytes,
-            file_name="electricity_vs_coal.gif",
-            mime="image/gif",
-            use_container_width=True,
+            label="Install `kaleido` to enable GIF downloads",
+            data=b"",
+            disabled=True,
+            help="Add kaleido to your environment (e.g., `pip install kaleido`) to export charts.",
         )
 
 
