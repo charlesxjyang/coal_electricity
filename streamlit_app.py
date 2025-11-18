@@ -132,7 +132,7 @@ def build_figure(
             f"({', '.join(selected_countries or unique_countries)})"
         ),
         xaxis_title="Electricity from Coal (% of total)",
-        yaxis_title="Electricity consumption per capita",
+        yaxis_title="Electricity consumption per capita (kWh)",
         xaxis=dict(
             range=[x_min, x_max],
             tickfont={"size": 14},
