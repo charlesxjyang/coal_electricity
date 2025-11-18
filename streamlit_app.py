@@ -5,7 +5,6 @@ import importlib.util
 from itertools import cycle
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 from plotly.express import colors as px_colors
 import streamlit as st
@@ -57,6 +56,11 @@ def build_figure(
         )
         return fig
 
+    df_filtered = (
+        df_filtered.sort_values(by=["Country Name", "Year"])
+        .drop_duplicates(subset=["Country Name", "Year"], keep="last")
+    )
+
     x_min = df_filtered["Coal_Percentage_Value"].min() * 0.95
     x_max = df_filtered["Coal_Percentage_Value"].max() * 1.05
     y_min = df_filtered["Electricity_Consumption_Value"].min() * 0.95
@@ -67,39 +71,59 @@ def build_figure(
     for country in unique_countries:
         color_map[country] = next(palette_cycle)
 
-    fig = px.scatter(
-        df_filtered,
-        x="Coal_Percentage_Value",
-        y="Electricity_Consumption_Value",
-        animation_frame="Year",
-        animation_group="Country Name",
-        color="Country Name",
-        hover_name="Country Name",
-        category_orders={"Country Name": unique_countries},
-        color_discrete_map=color_map,
-        labels={
-            "Coal_Percentage_Value": "Electricity from Coal (% of total)",
-            "Electricity_Consumption_Value": "Electric power consumption (kWh per capita)",
-        },
-    )
-
+    years = sorted(df_filtered["Year"].unique())
+    country_data_map: dict[str, pd.DataFrame] = {}
     for country in unique_countries:
-        country_data = (
-            df_filtered[df_filtered["Country Name"] == country]
-            .sort_values(by="Year")
-            .drop_duplicates(subset="Year")
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=country_data["Coal_Percentage_Value"],
-                y=country_data["Electricity_Consumption_Value"],
-                mode="lines",
-                line=dict(color=color_map[country], width=1.5),
-                name=f"{country} trend",
-                showlegend=False,
-                hoverinfo="skip",
+        country_data_map[country] = df_filtered[df_filtered["Country Name"] == country]
+
+    frames: list[go.Frame] = []
+    for year in years:
+        frame_traces: list[go.Scatter] = []
+        for country in unique_countries:
+            country_data = country_data_map[country]
+            history = country_data[country_data["Year"] <= year]
+            if history.empty:
+                continue
+
+            frame_traces.append(
+                go.Scatter(
+                    x=history["Coal_Percentage_Value"],
+                    y=history["Electricity_Consumption_Value"],
+                    mode="lines",
+                    line=dict(color=color_map[country], width=2),
+                    name=f"{country} trajectory",
+                    showlegend=False,
+                    hoverinfo="skip",
+                    legendgroup=country,
+                )
             )
-        )
+
+            current_point = history.iloc[-1]
+            frame_traces.append(
+                go.Scatter(
+                    x=[current_point["Coal_Percentage_Value"]],
+                    y=[current_point["Electricity_Consumption_Value"]],
+                    mode="markers",
+                    marker=dict(color=color_map[country], size=10),
+                    name=country,
+                    legendgroup=country,
+                    hovertemplate=(
+                        "Country: %{customdata[0]}<br>Year: %{customdata[1]}<br>"
+                        "Coal from electricity: %{x:.2f}%<br>"
+                        "Consumption: %{y:.0f} kWh<extra></extra>"
+                    ),
+                    customdata=[[country, int(current_point["Year"])]],
+                )
+            )
+
+        frames.append(go.Frame(data=frame_traces, name=str(year)))
+
+    if frames:
+        initial_data = frames[0].data
+    else:
+        initial_data = []
+
+    fig = go.Figure(data=initial_data, frames=frames)
 
     fig.update_layout(
         title_text=(
@@ -112,11 +136,53 @@ def build_figure(
         yaxis=dict(range=[y_min, y_max]),
         hovermode="closest",
         height=700,
+        updatemenus=[
+            {
+                "type": "buttons",
+                "direction": "left",
+                "x": 0.0,
+                "y": -0.1,
+                "showactive": False,
+                "buttons": [
+                    {
+                        "label": "Play",
+                        "method": "animate",
+                        "args": [
+                            None,
+                            {
+                                "frame": {"duration": 800, "redraw": True},
+                                "transition": {"duration": 200},
+                                "fromcurrent": True,
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Pause",
+                        "method": "animate",
+                        "args": [[None], {"frame": {"duration": 0}, "mode": "immediate"}],
+                    },
+                ],
+            }
+        ],
+        sliders=[
+            {
+                "active": 0,
+                "y": -0.15,
+                "x": 0.05,
+                "len": 0.9,
+                "pad": {"b": 10, "t": 50},
+                "currentvalue": {"prefix": "Year: ", "visible": True},
+                "steps": [
+                    {
+                        "args": [[str(year)], {"frame": {"duration": 0}, "mode": "immediate"}],
+                        "label": str(year),
+                        "method": "animate",
+                    }
+                    for year in years
+                ],
+            }
+        ],
     )
-
-    if fig.layout.updatemenus:
-        fig.layout.updatemenus[0].buttons[0].args[1]["frame"]["duration"] = 800
-        fig.layout.updatemenus[0].buttons[0].args[1]["transition"]["duration"] = 200
 
     return fig
 
@@ -126,8 +192,8 @@ def figure_to_gif(fig: go.Figure) -> bytes:
 
     try:
         image_bytes = fig.to_image(format="png", width=1400, height=800, scale=2)
-    except ValueError as exc:  # Raised when Kaleido is not available.
-        raise RuntimeError("Kaleido is required to export the chart as a GIF.") from exc
+    except ValueError as exc:  # Raised when Kaleido is not available or misconfigured.
+        raise RuntimeError(str(exc)) from exc
 
     png_image = Image.open(BytesIO(image_bytes))
     output = BytesIO()
@@ -139,7 +205,15 @@ def figure_to_gif(fig: go.Figure) -> bytes:
 def kaleido_available() -> bool:
     """Check whether Kaleido is importable in the current environment."""
 
-    return importlib.util.find_spec("kaleido") is not None
+    spec = importlib.util.find_spec("kaleido")
+    if spec is None:
+        return False
+
+    try:
+        importlib.util.module_from_spec(spec)
+    except Exception:
+        return False
+    return True
 
 
 def main() -> None:
@@ -174,10 +248,13 @@ def main() -> None:
     if kaleido_available():
         try:
             gif_bytes = figure_to_gif(fig)
-        except RuntimeError:
-            st.warning(
-                "Kaleido is installed but failed to initialize. Please restart the app.",
-                icon="⚠️",
+        except RuntimeError as exc:
+            st.error(
+                "Plotly could not talk to Kaleido to export the chart. "
+                "Please reinstall `kaleido` (e.g., `pip install --force-reinstall kaleido`) "
+                "and then refresh the app.\n\n"
+                f"Details: {exc}",
+                icon="🚫",
             )
         else:
             st.download_button(
