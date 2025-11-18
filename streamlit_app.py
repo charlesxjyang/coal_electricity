@@ -31,6 +31,7 @@ INITIAL_SELECTED_COUNTRIES = [
 def load_data(path: str) -> pd.DataFrame:
     """Read the cleaned dataset that ships with the repository."""
     df = pd.read_csv(path)
+    df["Country Name"] = df["Country Name"].replace({"Korea, Rep": "South Korea"})
     return df.dropna(subset=["Electricity_Consumption_Value", "Coal_Percentage_Value"])
 
 
@@ -52,7 +53,7 @@ def build_figure(
         fig.update_layout(
             title_text="No data available for the selected filters",
             xaxis_title="Electricity from Coal (% of total)",
-            yaxis_title="Electric power consumption (kWh per capita)",
+            yaxis_title="Electricity consumption per capita",
         )
         return fig
 
@@ -131,9 +132,17 @@ def build_figure(
             f"({', '.join(selected_countries or unique_countries)})"
         ),
         xaxis_title="Electricity from Coal (% of total)",
-        yaxis_title="Electric power consumption (kWh per capita)",
-        xaxis=dict(range=[x_min, x_max]),
-        yaxis=dict(range=[y_min, y_max]),
+        yaxis_title="Electricity consumption per capita",
+        xaxis=dict(
+            range=[x_min, x_max],
+            tickfont={"size": 14},
+            title_font={"size": 18},
+        ),
+        yaxis=dict(
+            range=[y_min, y_max],
+            tickfont={"size": 14},
+            title_font={"size": 18},
+        ),
         hovermode="closest",
         height=700,
         updatemenus=[
@@ -150,8 +159,8 @@ def build_figure(
                         "args": [
                             None,
                             {
-                                "frame": {"duration": 800, "redraw": True},
-                                "transition": {"duration": 200},
+                                "frame": {"duration": 400, "redraw": True},
+                                "transition": {"duration": 100},
                                 "fromcurrent": True,
                             },
                         ],
