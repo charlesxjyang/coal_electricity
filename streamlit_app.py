@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from io import BytesIO
-import importlib.util
 from itertools import cycle
 
 import pandas as pd
@@ -9,6 +9,10 @@ import plotly.graph_objects as go
 from plotly.express import colors as px_colors
 import streamlit as st
 from PIL import Image
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 st.set_page_config(
     page_title="Coal vs Electricity Consumption",
@@ -38,10 +42,20 @@ def load_data(path: str) -> pd.DataFrame:
 COLOR_PALETTE = px_colors.qualitative.Safe
 
 
+@dataclass
+class AnimationContext:
+    years: list[int]
+    unique_countries: list[str]
+    country_data_map: dict[str, pd.DataFrame]
+    color_map: dict[str, str]
+    x_range: tuple[float, float]
+    y_range: tuple[float, float]
+
+
 def build_figure(
     df_plot: pd.DataFrame,
     selected_countries: list[str],
-) -> go.Figure:
+) -> tuple[go.Figure, AnimationContext | None]:
     df_filtered = df_plot.copy()
 
     if selected_countries:
@@ -55,7 +69,7 @@ def build_figure(
             xaxis_title="Electricity from Coal (% of total)",
             yaxis_title="Electricity consumption per capita (kWh)",
         )
-        return fig
+        return fig, None
 
     df_filtered = (
         df_filtered.sort_values(by=["Country Name", "Year"])
@@ -193,36 +207,84 @@ def build_figure(
         ],
     )
 
-    return fig
+    context = AnimationContext(
+        years=years,
+        unique_countries=unique_countries,
+        country_data_map=country_data_map,
+        color_map=color_map,
+        x_range=(x_min, x_max),
+        y_range=(y_min, y_max),
+    )
+
+    return fig, context
 
 
-def figure_to_gif(fig: go.Figure) -> bytes:
-    """Render the current Plotly figure into a GIF image and return raw bytes."""
+def figure_to_gif(context: AnimationContext) -> bytes:
+    """Render an animated GIF using Matplotlib, avoiding Kaleido dependencies."""
 
-    try:
-        image_bytes = fig.to_image(format="png", width=1400, height=800, scale=2)
-    except ValueError as exc:  # Raised when Kaleido is not available or misconfigured.
-        raise RuntimeError(str(exc)) from exc
+    if not context.years:
+        raise RuntimeError("No timeline data available for export.")
 
-    png_image = Image.open(BytesIO(image_bytes))
+    frames: list[Image.Image] = []
+    plt.style.use("seaborn-v0_8-darkgrid")
+    for year in context.years:
+        fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
+        ax.set_xlim(context.x_range)
+        ax.set_ylim(context.y_range)
+        ax.set_xlabel("Electricity from Coal (% of total)")
+        ax.set_ylabel("Electric power consumption (kWh per capita)")
+        ax.set_title(f"Electricity Consumption vs. Coal Percentage — {year}")
+
+        for country in context.unique_countries:
+            country_data = context.country_data_map[country]
+            history = country_data[country_data["Year"] <= year]
+            if history.empty:
+                continue
+
+            ax.plot(
+                history["Coal_Percentage_Value"],
+                history["Electricity_Consumption_Value"],
+                color=context.color_map[country],
+                linewidth=2,
+                label=country,
+            )
+            last_point = history.iloc[-1]
+            ax.scatter(
+                last_point["Coal_Percentage_Value"],
+                last_point["Electricity_Consumption_Value"],
+                color=context.color_map[country],
+                s=50,
+            )
+
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            by_label = dict(zip(labels, handles))
+            ax.legend(
+                by_label.values(),
+                by_label.keys(),
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1),
+                frameon=False,
+            )
+        fig.tight_layout()
+
+        buffer = BytesIO()
+        fig.savefig(buffer, format="png", bbox_inches="tight")
+        plt.close(fig)
+        buffer.seek(0)
+        frames.append(Image.open(buffer).convert("P"))
+
     output = BytesIO()
-    png_image.save(output, format="GIF")
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=250,
+        loop=0,
+    )
     output.seek(0)
     return output.read()
-
-
-def kaleido_available() -> bool:
-    """Check whether Kaleido is importable in the current environment."""
-
-    spec = importlib.util.find_spec("kaleido")
-    if spec is None:
-        return False
-
-    try:
-        importlib.util.module_from_spec(spec)
-    except Exception:
-        return False
-    return True
 
 
 def main() -> None:
@@ -249,19 +311,20 @@ def main() -> None:
         help="Choose any number of countries to display at once.",
     )
 
-    fig = build_figure(df_plot, country_selection)
+    fig, animation_context = build_figure(df_plot, country_selection)
 
     st.plotly_chart(fig, width="stretch")
     st.caption("Press the ▶️ button below the chart to watch the timeline animate.")
 
-    if kaleido_available():
+    if animation_context is None:
+        st.info("Add at least one country to enable GIF downloads.")
+    else:
         try:
-            gif_bytes = figure_to_gif(fig)
+            gif_bytes = figure_to_gif(animation_context)
         except RuntimeError as exc:
             st.error(
-                "Plotly could not talk to Kaleido to export the chart. "
-                "Please reinstall `kaleido` (e.g., `pip install --force-reinstall kaleido`) "
-                "and then refresh the app.\n\n"
+                "Unable to build a GIF for the current selection. "
+                "Please adjust the filters and try again.\n\n"
                 f"Details: {exc}",
                 icon="🚫",
             )
@@ -273,13 +336,6 @@ def main() -> None:
                 mime="image/gif",
                 use_container_width=True,
             )
-    else:
-        st.download_button(
-            label="Install `kaleido` to enable GIF downloads",
-            data=b"",
-            disabled=True,
-            help="Add kaleido to your environment (e.g., `pip install kaleido`) to export charts.",
-        )
 
 
 if __name__ == "__main__":
